@@ -1,0 +1,187 @@
+---
+title: "Resumen datos CNAA - actualización septiembre 2025"
+author: "Erik Sandvig"
+date: "2023-06-05"
+output: html_document
+---
+
+Paquetes
+```{r}
+library(tidyverse)
+library(lubridate)
+library(ggrepel)
+library(gt)
+library(webshot2)
+library(dplyr)
+```
+
+Datos
+```{r}
+data <- read.csv("datos cnaa sep 2025.csv")
+#incluye .sp
+especies <- read.csv("especies censables cnaa.csv")
+especies <- especies %>% 
+  mutate(Scientific.Name = scientific_name)
+
+#remover subespecies y solo dejar especies censables 
+especies_limpio <- read.csv("especies censables cnaa limpio.csv")
+especies_limpio <- especies_limpio %>% 
+  mutate(Scientific.Name = scientific_name)
+
+#limpiar y transformar datos
+data <- data %>% 
+  mutate(Date = as.Date(Date), Count = as.numeric(Count), Common.Name = as.factor(Common.Name), Scientific.Name = as.factor(Scientific.Name), Región = as.factor(State.Province), Location = as.factor(Location)) %>% 
+  inner_join(especies_limpio, by = 'Scientific.Name') %>% 
+  droplevels()
+  
+#ordenar regiones
+levels(data$Región)<- c('Aysén', 'Antofagasta', 'Arica y Parinacota','Araucanía', 'Atacama', 'Bío-Bío', 'Coquimbo', "O'Higgins",'Los Lagos', 'Los Ríos', 'Magallanes', 'Maule', 'Ñuble', 'Metropolitana', 'Tarapacá', 'Valparaíso')
+data$Región <- factor(data$Región, levels = c('Arica y Parinacota','Tarapacá', 'Antofagasta', 'Atacama','Coquimbo','Valparaíso', 'Metropolitana',"O'Higgins",'Maule', 'Ñuble','Bío-Bío','Araucanía', 'Los Ríos','Los Lagos', 'Aysén','Magallanes'))
+
+
+#separar datos para verano e invierno 
+data_verano <- data%>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- data%>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+```
+
+Gráficos
+```{r}
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date='year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date='year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill=Censo, col=Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_x_continuous(2009:2025)+
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue'))+
+  theme_classic()+
+  theme(legend.position = 'none')+
+  ylim(0,90)
+
+print(sp_plot)
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm=T)) %>% 
+  rename(date='year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm=T)) %>% 
+  rename(date='year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill=Censo, col=Censo)) +
+  geom_line(linewidth=1) +
+  scale_x_continuous(2009:2025)+
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue'))+
+  theme_classic()+
+  theme(legend.position = 'none')+
+  ylim(0,180000)
+
+print(ab_plot)
+
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date='year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date='year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill=Censo, col=Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "Año", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue'))+
+  scale_x_continuous(2009:2025)+
+  theme_classic()+
+  theme(legend.position = c(0.15, 0.75))+
+  geom_text_repel(aes(label=N),vjust= -2,  size=3.5,show.legend = F)+
+  ylim(0,200)
+
+print(sitios_plot)
+
+ggsave("Riqueza CNAA sep 2025 SP.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia CNAA sep 2025 SP.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Sitios CNAA sep 2025 SP.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+```
+
+Detalle regional
+```{r}
+#Verano
+
+plot_sitios_region_verano <- data_verano %>%
+  mutate(Date = as.Date(Date)) %>%
+  group_by(year(Date),Región) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  pivot_wider(names_from = 1, values_from = N, values_fill = 0) %>% 
+  mutate(across(`2010`:`2025`)) %>%
+  select(`Región`, `2010`, `2011`, `2012`, `2013`, `2014`, `2015`, `2016`, `2017`, `2018`, `2019`, `2020`, `2021`, `2022`, `2023`, `2024`, `2025`) %>%
+  arrange(`Región`) 
+
+Tplot_sitios_region_verano <- plot_sitios_region_verano %>%
+  gt() %>%
+  data_color(
+    columns = c(`2010`, `2011`, `2012`, `2013`, `2014`, `2015`, `2016`, `2017`, `2018`, `2019`, `2020`, `2021`, `2022`, `2023`, `2024`, `2025`),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(range(plot_sitios_region_verano %>% select(-Región), na.rm = TRUE)))
+  )
+
+Tplot_sitios_region_verano
+
+plot_sitios_region_invierno <- data_invierno %>%
+  mutate(Date = as.Date(Date)) %>%
+  group_by(year(Date),Región) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  pivot_wider(names_from = 1, values_from = N, values_fill = 0) %>% 
+  mutate(across(`2009`:`2024`)) %>%
+  select(`Región`, `2009`, `2010`, `2011`, `2012`, `2013`, `2014`, `2015`, `2016`, `2017`, `2018`, `2019`, `2020`, `2021`, `2022`, `2023`, `2024`, `2025`) %>%
+  arrange(`Región`) 
+
+Tplot_sitios_region_invierno <- plot_sitios_region_invierno %>%
+  gt() %>%
+  data_color(
+    columns = c(`2009`, `2010`, `2011`, `2012`, `2013`, `2014`, `2015`, `2016`, `2017`, `2018`, `2019`, `2020`, `2021`, `2022`, `2023`, `2024`, `2025`),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(range(plot_sitios_region_invierno %>% select(-Región), na.rm = TRUE)))
+  )
+
+Tplot_sitios_region_invierno
+
+gtsave(Tplot_sitios_region_verano, file = "Sitios por Region CNAA sep 2025 ver SP.png")
+gtsave(Tplot_sitios_region_invierno, file = "Sitios por Region CNAA sep 2025 inv SP.png")
+
+```
+
