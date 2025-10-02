@@ -1,0 +1,4695 @@
+---
+title: "Resumen CNAA Regional - actualzación septiembre 25"
+author: "Marion Díaz"
+date: "2024-10-14"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+```{r paquetes}
+library(tidyverse)
+library(lubridate)
+library(ggrepel)
+library(gt)
+library(webshot2)
+library(dplyr)
+library(tidyr)
+library(sf)
+```
+#Prep.
+
+```{r Leer y limpiar datos generales}
+df <- read.csv("datos cnaa sep 2025.csv")
+df.s <- read.csv("SitiosCNAAjun25.csv", sep = ",")
+
+df.s <- df.s %>%
+  rename("Latitude" = "Lat", "Longitude" = "Long")
+
+#incluye .sp
+especies <- read.csv("especies censables cnaa.csv")
+especies <- especies %>% 
+  mutate(Scientific.Name = scientific_name)
+
+#remover subespecies y solo dejar especies censables 
+especies_limpio <- read.csv("especies censables cnaa limpio.csv")
+especies_limpio <- especies_limpio %>% 
+  mutate(Scientific.Name = scientific_name)
+
+#limpiar y transformar datos
+df <- df %>% 
+  mutate(Date = as.Date(Date), Count = as.numeric(Count), Common.Name = as.factor(Common.Name),
+         Scientific.Name = as.factor(Scientific.Name), Location = as.factor(Location)) %>% 
+  inner_join(especies_limpio, by = 'Scientific.Name') %>% 
+  droplevels()
+  
+#ordenar regiones
+df.s <- df.s %>%
+  mutate(region = case_when(
+    Región == "XV" ~ "Arica y Parinacota",
+    Región == "I" ~ "Tarapacá",
+    Región == "II" ~ "Antofagasta",
+    Región == "III" ~ "Atacama",
+    Región == "IV" ~ "Coquimbo",
+    Región == "V" ~ "Valparaíso",
+    Región == "XIII" ~ "Metropolitana",
+    Región == "VI" ~ "O'Higgins",
+    Región == "VII" ~ "Maule",
+    Región == "XVI" ~ "Ñuble",
+    Región == "VIII" ~ "Bío-Bío",
+    Región == "IX" ~ "Araucanía",
+    Región == "XIV" ~ "Los Ríos",
+    Región == "X" ~ "Los Lagos",
+    Región == "XI" ~ "Aysén",
+    Región == "XII" ~ "Magallanes"
+  ))
+
+levels(df.s$region)<- c('Aysén', 'Antofagasta', 'Arica y Parinacota','Araucanía', 'Atacama', 'Bío-Bío', 'Coquimbo', "O'Higgins",'Los Lagos', 'Los Ríos', 'Magallanes', 'Maule', 'Ñuble', 'Metropolitana', 'Tarapacá', 'Valparaíso')
+df.s$region <- factor(df.s$region, levels = c('Arica y Parinacota','Tarapacá', 'Antofagasta', 'Atacama','Coquimbo','Valparaíso', 'Metropolitana',"O'Higgins",'Maule', 'Ñuble','Bío-Bío','Araucanía', 'Los Ríos','Los Lagos', 'Aysén','Magallanes'))
+
+
+# Filtrar por coincidencia de nombres en "Location"
+# Crear vector de nombres de sitios de interés
+sitios_interes <- df.s$Lugar
+
+# Filtrar registros donde Location contenga algún nombre de sitio de interés
+in_CNAA_by_name <- df %>%
+  filter(sapply(Location, function(loc) {
+    any(sapply(sitios_interes, function(sitio) {
+      grepl(sitio, loc, ignore.case = TRUE)
+    }))
+  }))
+
+# Agregar columna indicando que fueron filtrados por nombre
+if(nrow(in_CNAA_by_name) > 0) {
+  in_CNAA_by_name$MetodoFiltro <- "Por_Nombre"
+  
+  # Asignar el sitio correspondiente
+  in_CNAA_by_name$SitioCNAA <- sapply(in_CNAA_by_name$Location, function(loc) {
+    for(sitio in sitios_interes) {
+      if(grepl(sitio, loc, ignore.case = TRUE)) {
+        return(sitio)
+      }
+    }
+    return(NA)
+  })
+  
+  # Agregar región correspondiente
+  in_CNAA_by_name$Región <- df.s$region[match(in_CNAA_by_name$SitioCNAA, df.s$Lugar)]
+}
+
+cat("Registros filtrados por nombre:", nrow(in_CNAA_by_name), "\n")
+
+# Filtrar espacialmente los registros restantes
+# Excluir los ya capturados por nombre
+df_restante <- df %>%
+  filter(!Submission.ID %in% in_CNAA_by_name$Submission.ID)
+
+cat("Registros restantes para filtro espacial:", nrow(df_restante), "\n")
+
+# Filtro espacial con los registros restantes
+df_restante_sf <- df_restante %>% 
+  select(Longitude, Latitude) %>% 
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326)
+
+df.s_sf <- df.s %>% 
+  filter(!is.na(Longitude) & !is.na(Latitude)) %>%
+  select(Longitude, Latitude) %>% 
+  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326)
+
+# Transformar a UTM para Chile (zona 19S)
+utm_crs <- 32719
+df_restante_sf_utm <- st_transform(df_restante_sf, crs = utm_crs)
+df.s_sf_utm <- st_transform(df.s_sf, crs = utm_crs)
+
+# Crear buffer de 650 metros
+df.s_sf_buffer <- st_buffer(df.s_sf_utm, dist = 650)
+
+# Identificar intersecciones
+intersects <- st_intersects(df_restante_sf_utm, df.s_sf_buffer, sparse = TRUE)
+rows_with_intersection <- lengths(intersects) > 0
+
+# Filtrar los datos
+in_CNAA_espacial <- df_restante[rows_with_intersection, ]
+
+# Agregar información del sitio más cercano
+if(nrow(in_CNAA_espacial) > 0) {
+  in_CNAA_espacial$MetodoFiltro <- "Por_Buffer_Espacial"
+  
+  site_matches <- integer(nrow(in_CNAA_espacial))
+  lista_indices <- which(rows_with_intersection)
+  
+  for(i in seq_along(lista_indices)) {
+    lista_idx <- lista_indices[i]
+    site_matches[i] <- intersects[[lista_idx]][1]
+  }
+  
+  in_CNAA_espacial$SitioCNAA <- df.s$Lugar[site_matches]
+  in_CNAA_espacial$Región <- df.s$region[site_matches]
+}
+
+cat("Registros filtrados espacialmente:", nrow(in_CNAA_espacial), "\n")
+
+# Combinar conjuntos
+data <- bind_rows(in_CNAA_by_name, in_CNAA_espacial)
+
+cat("\nTotal registros en CNAA:", nrow(data), "\n")
+cat("  - Por nombre:", sum(data$MetodoFiltro == "Por_Nombre"), "\n")
+cat("  - Por buffer espacial:", sum(data$MetodoFiltro == "Por_Buffer_Espacial"), "\n")
+
+# Registros que NO quedaron en ningún filtro
+NoData <- df %>%
+  filter(!Submission.ID %in% data$Submission.ID)
+
+cat("\nRegistros fuera de sitios CNAA (NoData):", nrow(NoData), "\n")
+cat("Verificación total:", nrow(data) + nrow(NoData), "==", nrow(df), "\n")
+
+write.csv(data,"CNAAsep2025.csv")
+```
+
+#Arica
+```{r Arica y Parinacota}
+
+XV <- filter(data, Región == "Arica y Parinacota")
+
+#separar datos para verano e invierno 
+data_verano <- XV %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- XV %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+Sitios_region_inv <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40) 
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8) 
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+
+#Sitios censados en la región
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_verano, fill = list(Visitado = "")) 
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25), 
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8) 
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+ggsave("Sitios XV CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza XV CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia XV CNAA sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(Sitios_region_ver, file = "Sitios XV CNAA sep 2025 ver.png")
+gtsave(Sitios_region_inv, file = "Sitios XV CNAA sep 2025 inv.png")
+
+gtsave(tSPs_region_ver, file = "SPs XV CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs XV CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs XV CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs XV CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs XV CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs XV CNAA sep 2025 inv2.png")
+
+
+```
+
+#No hay datos en la región (Tarapacá)
+```{r Tarapacá}
+
+I <- filter(data, Región == "Tarapacá")
+
+```
+
+#No hay datos en la región (Antofagasta)
+```{r Antofagasta}
+II <- filter(data, Región == "Antofagasta")
+
+```
+
+#Atacama
+```{r Atacama}
+III <- filter(data, Región == "Atacama")
+
+#separar datos para verano e invierno 
+data_verano <- III %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- III %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  scale_x_continuous(limits = c(2012, 2025)) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  scale_x_continuous(limits = c(2012, 2025)) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  scale_x_continuous(limits = c(2012, 2025)) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+Sitios_region_inv <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+
+#Sitios censados en la región
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_verano, fill = list(Visitado = "")) 
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+ggsave("Sitios III CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza III CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia III CNAA sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(Sitios_region_ver, file = "Sitios III CNAA sep 2025 ver.png")
+gtsave(Sitios_region_inv, file = "Sitios III CNAA sep 2025 inv.png")
+
+gtsave(tSPs_region_ver, file = "SPs III CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs III CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs III CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs III CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs III CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs III CNAA sep 2025 inv2.png")
+
+```
+
+#Coquimbo
+```{r Coquimbo}
+IV <- filter(data, Región == "Coquimbo")
+
+#separar datos para verano e invierno 
+data_verano <- IV %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- IV %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+Sitios_region_inv <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+
+#Sitios censados en la región
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_verano, fill = list(Visitado = "")) 
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+ggsave("Sitios IV CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza IV CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia IV sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(Sitios_region_ver, file = "Sitios IV CNAA sep 2025 ver.png")
+gtsave(Sitios_region_inv, file = "Sitios IV CNAA sep 2025 inv.png")
+
+gtsave(tSPs_region_ver, file = "SPs IV CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs IV CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs IV CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs IV CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs IV CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs IV CNAA sep 2025 inv2.png")
+
+```
+
+#Valparaíso
+```{r Valparaíso}
+V <- filter(data, Región == "Valparaíso")
+
+#separar datos para verano e invierno 
+data_verano <- V %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- V %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+Sitios_region_inv <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+
+#Sitios censados en la región
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_verano, fill = list(Visitado = "")) 
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+ggsave("Sitios V CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza V CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia V CNAA sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(Sitios_region_ver, file = "Sitios V CNAA sep 2025 ver.png")
+gtsave(Sitios_region_inv, file = "Sitios V CNAA sep 2025 inv.png")
+
+gtsave(tSPs_region_ver, file = "SPs V CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs V CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs V CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs V CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs V CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs V CNAA sep 2025 inv2.png")
+
+```
+
+#Metropolitana
+```{r Metropolitana}
+XIII <- filter(data, Región == "Metropolitana")
+
+#separar datos para verano e invierno 
+data_verano <- XIII %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- XIII %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+Sitios_region_inv <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8) 
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+
+#Sitios censados en la región
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_verano, fill = list(Visitado = "")) 
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+ggsave("Sitios XIII CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza XIII CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia XIII CNAA sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(Sitios_region_ver, file = "Sitios XIII CNAA sep 2025 ver.png")
+gtsave(Sitios_region_inv, file = "Sitios XIII CNAA sep 2025 inv.png")
+
+gtsave(tSPs_region_ver, file = "SPs XIII CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs XIII CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs XIII CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs XIII CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs XIII CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs XIII CNAA sep 2025 inv2.png")
+
+```
+
+#O'Higgins
+```{r O'Higgins}
+VI <- filter(data, Región == "O'Higgins")
+
+#separar datos para verano e invierno 
+data_verano <- VI %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- VI %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+Sitios_region_inv <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+
+#Sitios censados en la región
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_verano, fill = list(Visitado = "")) 
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges")
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+ggsave("Sitios VI CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza VI CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia VI CNAA sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(Sitios_region_ver, file = "Sitios VI CNAA sep 2025 ver.png")
+gtsave(Sitios_region_inv, file = "Sitios VI CNAA sep 2025 inv.png")
+
+gtsave(tSPs_region_ver, file = "SPs VI CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs VI CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs VI CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs VI CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs VI CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs VI CNAA sep 2025 inv2.png")
+
+```
+
+#Maule
+```{r Maule}
+VII <- filter(data, Región == "Maule")
+
+#separar datos para verano e invierno 
+data_verano <- VII %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- VII %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+Sitios_region_inv <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+
+#Sitios censados en la región
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_verano, fill = list(Visitado = "")) 
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+ggsave("Sitios VII CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza VII CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia VII CNAA sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(Sitios_region_ver, file = "Sitios VII CNAA sep 2025 ver.png")
+gtsave(Sitios_region_inv, file = "Sitios VII CNAA sep 2025 inv.png")
+
+gtsave(tSPs_region_ver, file = "SPs VII CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs VI CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs VII CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs VII CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs VII CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs VII CNAA sep 2025 inv2.png")
+
+```
+
+#Ñuble
+```{r Ñuble}
+XVI <- filter(data, Región == "Ñuble")
+
+#separar datos para verano e invierno 
+data_verano <- XVI %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- XVI %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+Sitios_region_inv <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+
+#Sitios censados en la región
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_verano, fill = list(Visitado = "")) 
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+
+ggsave("Sitios XVI CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza XVI CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia XVI CNAA sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(Sitios_region_ver, file = "Sitios XVI CNAA sep 2025 ver.png")
+gtsave(Sitios_region_inv, file = "Sitios XVI CNAA sep 2025 inv.png")
+
+gtsave(tSPs_region_ver, file = "SPs XVI CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs XVI CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs XVI CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs XVI CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs XVI CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs XVI CNAA sep 2025 inv2.png")
+
+```
+
+#Bío-Bío
+```{r Bío-Bío}
+VIII <- filter(data, Región == "Bío-Bío")
+
+#separar datos para verano e invierno 
+data_verano <- VIII %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- VIII %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+Sitios_region_inv <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+
+#Sitios censados en la región
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_verano, fill = list(Visitado = "")) 
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+ggsave("Sitios VIII CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza VIII CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia VIII CNAA sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(Sitios_region_ver, file = "Sitios VIII CNAA sep 2025 ver.png")
+gtsave(Sitios_region_inv, file = "Sitios VIII CNAA sep 2025 inv.png")
+
+gtsave(tSPs_region_ver, file = "SPs VIII CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs VIII CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs VIII CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs VIII CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs VIII CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs VIII CNAA sep 2025 inv2.png")
+
+```
+
+#Araucanía
+```{r Araucanía}
+IX <- filter(data, Región == "Araucanía")
+write.csv(data, "ix.csv")
+
+#separar datos para verano e invierno 
+data_verano <- IX %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- IX %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+censosver <- sum(sitios_verano$N)
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+censosinv <- sum(sitios_invierno$N)
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+Sitios_region_inv <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+
+#Sitios censados en la región
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_verano, fill = list(Visitado = "")) 
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+ggsave("Sitios IX CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza IX CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia IX CNAA sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(Sitios_region_ver, file = "Sitios IX CNAA sep 2025 ver.png")
+gtsave(Sitios_region_inv, file = "Sitios IX CNAA sep 2025 inv.png")
+
+gtsave(tSPs_region_ver, file = "SPs IX CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs IX CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs IX CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs IX CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs IX CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs IX CNAA sep 2025 inv2.png")
+
+```
+
+#Los Ríos
+```{r Los Ríos}
+XIV <- filter(data, Región == "Los Ríos")
+
+#separar datos para verano e invierno 
+data_verano <- XIV %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- XIV %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+censosver <- sum(sitios_verano$N)
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+censosinv <- sum(sitios_invierno$N)
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+Sitios_region_inv <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+
+#Sitios censados en la región
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_verano, fill = list(Visitado = "")) 
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+
+ggsave("Sitios XIV CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza XIV CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia XIV CNAA sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(Sitios_region_ver, file = "Sitios XIV CNAA sep 2025 ver.png")
+gtsave(Sitios_region_inv, file = "Sitios XIV CNAA sep 2025 inv.png")
+
+gtsave(tSPs_region_ver, file = "SPs XIV CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs XIV CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs XIV CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs XIV CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs XIV CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs XIV CNAA sep 2025 inv2.png")
+
+```
+
+#Los Lagos
+```{r Los Lagos}
+X <- filter(data, Región == "Los Lagos")
+
+#separar datos para verano e invierno 
+data_verano <- X %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- X %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+Sitios_region_inv <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+
+#Sitios censados en la región
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_verano, fill = list(Visitado = "")) 
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+ggsave("Sitios X CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza X CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia X CNAA sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(Sitios_region_ver, file = "Sitios X CNAA sep 2025 ver.png")
+gtsave(Sitios_region_inv, file = "Sitios X CNAA sep 2025 inv.png")
+
+gtsave(tSPs_region_ver, file = "SPs X CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs X CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs X CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs X CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs X CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs X CNAA sep 2025 inv2.png")
+
+```
+
+#Aysén
+```{r Aysén}
+XI <- filter(data, Región == "Aysén")
+
+#separar datos para verano e invierno 
+data_verano <- XI %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- XI %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+Sitios_region_inv <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+
+#Sitios censados en la región
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_verano, fill = list(Visitado = "")) 
+
+Sitios_region_ver <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_verano)), ~ . != ""))) %>%
+  arrange(Sitio) %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  # Ajuste de ancho de columnas
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+
+ggsave("Sitios XI CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza XI CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia XI CNAA sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(Sitios_region_ver, file = "Sitios XI CNAA sep 2025 ver.png")
+gtsave(Sitios_region_inv, file = "Sitios XI CNAA sep 2025 inv.png")
+
+gtsave(tSPs_region_ver, file = "SPs XI CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs XI CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs XI CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs XI CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs XI CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs XI CNAA sep 2025 inv2.png")
+
+```
+
+#Magallanes
+```{r Magallanes}
+XII <- filter(data, Región == "Magallanes")
+
+#separar datos para verano e invierno 
+data_verano <- XII %>% 
+  filter(Date >= as.Date(paste(year(Date), 01, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 02, 28, sep = "-")))
+
+data_invierno <- XII %>% 
+  filter(Date >= as.Date(paste(year(Date), 06, 15, sep = "-")),
+           Date <= as.Date(paste(year(Date), 08, 15, sep = "-")))
+
+años_invierno <- 2009:2025
+años_verano <- 2010:2025
+
+#Censos por temporada por año
+sitios_verano <- data_verano %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Verano")
+
+sitios_invierno <- data_invierno %>% 
+  group_by(year(Date)) %>% 
+  summarise(N = n_distinct(Location)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+sitios_all <- rbind(sitios_verano,sitios_invierno)
+
+sitios_plot <- ggplot(sitios_all, aes(x = date, y = N, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N sitios') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position.inside = c(0.2, 0.8)) +
+  geom_text_repel(aes(label = N), vjust = -2,  size = 3.5, show.legend = F) +
+  ylim(0, max(sitios_all$N))
+
+#Riqueza
+sp_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>%
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+sp_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(richness = n_distinct(Common.Name)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Invierno")
+
+sp_all <- rbind(sp_verano,sp_invierno)
+
+sp_plot <- ggplot(sp_all, aes(x = date, y = richness, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = "N especies") +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(sp_all$richness))
+
+#Abundancia relativa
+ab_verano <- data_verano %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)')%>%
+  mutate(Censo = "Verano")
+
+ab_invierno <- data_invierno %>%
+  group_by(year(Date)) %>% 
+  summarise(Abundancia = sum(Count, na.rm = T)) %>% 
+  rename(date = 'year(Date)') %>%
+  mutate(Censo = "Invierno")
+
+ab_all <- rbind(ab_verano,ab_invierno)
+
+ab_plot <- ggplot(ab_all, aes(x = date, y = Abundancia, fill = Censo, col = Censo)) +
+  geom_line(linewidth = 1) +
+  labs(x = "", y = 'N individuos') +
+  scale_color_manual(values=c('Verano' = 'darkorange', 'Invierno' = 'lightblue')) +
+  theme_classic() +
+  theme(legend.position = 'none') +
+  ylim(0, max(ab_all$Abundancia))
+
+replicas.inv <- data_invierno %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+datos_sitios <- replicas.inv %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio)
+
+Sitios_region_inv_part1_data <- datos_sitios %>% slice(1:(n() %/% 2))
+Sitios_region_inv_part2_data <- datos_sitios %>% slice((n() %/% 2 + 1):n())
+
+Sitios_region_inv_part1 <- Sitios_region_inv_part1_data %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+Sitios_region_inv_part2 <- Sitios_region_inv_part2_data %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+tSitios_region_inv <- datos_sitios %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Blues") %>%
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.inv <- data_invierno %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.inv <- unique(conteos.inv$Common.Name)
+combinaciones.inv <- expand.grid(Common.Name = especies.inv, Año = años_invierno)
+
+# Unir conteos observados a las combinaciones
+SPs_region_inv <- combinaciones.inv %>%
+  left_join(conteos.inv, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_inv ~ 0, 
+    !Año %in% años_con_censo_inv ~ NA_real_,             
+    TRUE ~ Total_Count                              
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_inv <- SPs_region_inv %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_inv
+
+# Divide SPs_region_inv en dos partes
+SPs_region_inv_part1 <- SPs_region_inv %>% slice(1:(n() %/% 2))
+SPs_region_inv_part2 <- SPs_region_inv %>% slice((n() %/% 2 + 1):n())
+
+SPs_region_inv_part1 <- SPs_region_inv_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part1
+
+SPs_region_inv_part2 <- SPs_region_inv_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_invierno),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_invierno),
+    method = "numeric",
+    palette = "Blues",
+    domain = c(0, max(SPs_region_inv_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_inv_part2
+
+replicas.ver <- data_verano %>%
+  mutate(Date = as.Date(Date),
+         Año = year(Date)) %>%
+  group_by(SitioCNAA, Año) %>%
+  summarise(Visitado = n_distinct(SitioCNAA), .groups = 'drop') %>%
+  mutate(Visitado = ifelse(Visitado > 0, "*", "")) %>%
+  complete(SitioCNAA, Año = años_invierno, fill = list(Visitado = "")) 
+
+datos_sitios <- replicas.ver %>%
+  pivot_wider(names_from = Año, values_from = Visitado) %>%
+  rename(Sitio = SitioCNAA) %>%
+  mutate(Total = rowSums(across(all_of(as.character(años_invierno)), ~ . != ""))) %>%
+  arrange(Sitio)
+
+Sitios_region_ver_part1_data <- datos_sitios %>% slice(1:(n() %/% 2))
+Sitios_region_ver_part2_data <- datos_sitios %>% slice((n() %/% 2 + 1):n())
+
+Sitios_region_ver_part1 <- Sitios_region_ver_part1_data %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+Sitios_region_ver_part2 <- Sitios_region_ver_part2_data %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+tSitios_region_ver <- datos_sitios %>%
+  gt() %>%
+  data_color(columns = Total, method = "numeric", palette = "Oranges") %>%
+  cols_width(
+    Sitio ~ px(120),
+    everything() ~ px(25),
+    Total ~ px(40)
+  ) %>%
+  tab_options(
+    data_row.padding = px(2),
+    table.font.size = px(8)
+  )
+
+# Años en los que hubo censo realmente en la región
+años_con_censo_ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  distinct(Año) %>%
+  pull(Año)
+
+conteos.ver <- data_verano %>%
+  mutate(Año = year(Date)) %>%
+  group_by(Common.Name, Año) %>%
+  summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop")
+
+# Expandir todas las combinaciones posibles con los años completos
+especies.ver <- unique(conteos.ver$Common.Name)
+combinaciones.ver <- expand.grid(Common.Name = especies.ver, Año = años_verano)
+
+# Unir conteos observados a las combinaciones
+SPs_region_ver <- combinaciones.ver %>%
+  left_join(conteos.ver, by = c("Common.Name", "Año")) %>%
+  mutate(Total_Count = case_when(
+    is.na(Total_Count) & Año %in% años_con_censo_ver ~ 0,  
+    !Año %in% años_con_censo_ver ~ NA_real_,              
+    TRUE ~ Total_Count                                
+  )) %>%
+  pivot_wider(names_from = Año, values_from = Total_Count) %>%
+  rename(Especie = Common.Name) %>%
+  arrange(Especie)
+
+tSPs_region_ver <- SPs_region_ver %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+tSPs_region_ver
+
+# Divide SPs_region_ver en dos partes
+SPs_region_ver_part1 <- SPs_region_ver %>% slice(1:(n() %/% 2))
+SPs_region_ver_part2 <- SPs_region_ver %>% slice((n() %/% 2 + 1):n())
+
+
+SPs_region_ver_part1 <- SPs_region_ver_part1 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part1 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part1
+
+
+SPs_region_ver_part2 <- SPs_region_ver_part2 %>%
+  gt() %>%
+  fmt_missing(  
+    columns = as.character(años_verano),
+    missing_text = ""
+  ) %>%
+  data_color(
+    columns = as.character(años_verano),
+    method = "numeric",
+    palette = "Oranges",
+    domain = c(0, max(SPs_region_ver_part2 %>% select(where(is.numeric)), na.rm = TRUE)),
+    na_color = "transparent"  
+  )
+
+SPs_region_ver_part2
+
+ggsave("Sitios XII CNAA sep 2025.png", sitios_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Riqueza XII CNAA sep 2025.png", sp_plot, width = 4.5, height = 3.5, dpi = 300)
+ggsave("Abundancia XII CNAA sep 2025.png", ab_plot, width = 4.5, height = 3.5, dpi = 300)
+
+gtsave(tSitios_region_ver, file = "Sitios XII CNAA sep 2025 ver.png")
+gtsave(Sitios_region_ver_part1, file = "Sitios XII CNAA sep 2025 ver1.png")
+gtsave(Sitios_region_ver_part2, file = "Sitios XII CNAA sep 2025 ver2.png")
+gtsave(tSitios_region_inv, file = "Sitios XII CNAA sep 2025 inv.png")
+gtsave(Sitios_region_inv_part1, file = "Sitios XII CNAA sep 2025 inv1.png")
+gtsave(Sitios_region_inv_part2, file = "Sitios XII CNAA sep 2025 inv2.png")
+
+gtsave(tSPs_region_ver, file = "SPs XII CNAA sep 2025 ver.png")
+gtsave(tSPs_region_inv, file = "SPs XII CNAA sep 2025 inv.png")
+gtsave(SPs_region_ver_part1, file = "SPs XII CNAA sep 2025 ver1.png")
+gtsave(SPs_region_ver_part2, file = "SPs XII CNAA sep 2025 ver2.png")
+gtsave(SPs_region_inv_part1, file = "SPs XII CNAA sep 2025 inv1.png")
+gtsave(SPs_region_inv_part2, file = "SPs XII CNAA sep 2025 inv2.png")
+
+```
+
+
