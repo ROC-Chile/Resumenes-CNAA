@@ -1,8 +1,12 @@
-# Resumenes-CNAA
+# Resumen de datos CNAA
 
-El Resumen Nacional del Censo Neotropical de Aves Acuáticas en Chile está en el archivo "RESUMEN DATOS CNAA JUL 2025.pdf".
+El [Censo Neotropical de Aves Acuáticas (CNAA)](https://www.redobservadores.cl/proyectos/censo-neotropical-de-aves-acuaticas-cnaa) es un programa de monitoreo a largo plazo, liderado por [Wetlands International](https://www.wetlands.org) iniciado en 1990 para recolectar información sobre la abundancia y distribución de aves acuáticas de la Región Neotropical, que incluye parte del sur de Norteamérica, Centroamérica y Sudamérica. Este es coordinado en Chile desde el año 2009 por la [ROC](https://www.redobservadores.cl), sin embargo, es efectuado y nutrido por decenas de voluntarios y voluntarias que se despliegan cada temporada a lo largo del país.
+ 
+Los censos se basan en conteos de aves acuáticas que se realizan dos veces al año, en febrero y julio, cubriendo así verano y invierno, y tienen como objetivo contribuir en la construcción de conocimiento en torno a los humedales y aves acuáticas, promoviendo la participación local y definiendo prioridades de investigación y conservación. Los datos obtenidos de estos censos permiten la realizar estimaciones poblacionales de aves acuáticas y conocer sus tendencias a lo largo del tiempo. Actualmente este esquema de monitoreo es desarrollado en 14 de las 16 regiones del país y cubre un total aproximado de 230 sitios.
 
-El archivo "datos cnaa sep 2025.csv" contiene los datos almacenados en la cuenta CNAA-Chile de eBird, y el archivo "SitiosCNAAjun25.csv" contiene el listado e información de sitios prioritarios.
-Los archivos "Resumen nacional.Rmd" y "Resumenes regionales.Rmd" contiene los códigos utilizados para generar las tablas y gráficos presentes en los resúmenes. 
+En este repositorio puedan encontrar el resumen de los datos colectados hasta el presente, actualizados dos veces al año. Nuestro objetivo es presentar de manera visual el número de sitios censados cada temporada desde 2009 a la fecha, la abundancia (bruta) y riqueza registrada. Además detallamos la información en tablas con abundancia por año de cada especie registrada y la cobertura temporal de los sitios prioritarios censados. Estos resumenes los podrán descargar a escala [nacional](https://github.com/ROC-Chile/Resumenes-CNAA/blob/main/RESUMEN%20DATOS%20CNAA%20JUL%202025.pdf) y por [región](https://github.com/ROC-Chile/Resumenes-CNAA/tree/main/Resumenes%20regionales%202025).
 
-La carpeta Resumenes regionales 2025 contiene los archivos pdf de cada resumen regional.
+## Insumos para elaborar los resumenes
+- [Base de datos CNAA](https://github.com/ROC-Chile/Resumenes-CNAA/blob/main/datos%20cnaa%20sep%202025.csv)
+- [Lista de sitios prioritarios](https://github.com/ROC-Chile/Resumenes-CNAA/blob/main/SitiosCNAAjun25.csv)
+- Códigos utilizados para generar las tablas y gráficos presentes en los resúmenes: [nacional](https://github.com/ROC-Chile/Resumenes-CNAA/blob/main/Resumen%20nacional.Rmd) y [regional](https://github.com/ROC-Chile/Resumenes-CNAA/blob/main/Resumenes%20regionales.Rmd).
